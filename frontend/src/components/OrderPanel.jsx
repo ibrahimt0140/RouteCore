@@ -68,8 +68,13 @@ const OrderPanel = ({ orders, drones, onRefresh, simStatus }) => {
         <div style={{ marginTop: '10px', display: 'flex', gap: '8px', alignItems: 'center' }}>
           <div className="num-spinner">
             <button onClick={() => setGenCount(c => Math.max(1, c - 1))}>−</button>
-            <span>{genCount}</span>
-            <button onClick={() => setGenCount(c => Math.min(30, c + 1))}>+</button>
+            <input 
+              type="number" 
+              value={genCount} 
+              onChange={e => setGenCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+              className="spinner-input"
+            />
+            <button onClick={() => setGenCount(c => Math.min(100, c + 1))}>+</button>
           </div>
           <button className="btn btn-ghost btn-sm" onClick={generateOrders} disabled={isRunning || loading}>
             ⚡ Generate

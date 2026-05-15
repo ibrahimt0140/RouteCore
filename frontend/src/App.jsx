@@ -10,7 +10,6 @@ const POLL_MS = 600;
 function App() {
   const [drones, setDrones] = useState([]);
   const [orders, setOrders] = useState([]);
-  const [routes, setRoutes] = useState({});
   const [simStatus, setSimStatus] = useState('idle');  // idle | running | finished
   const [progress, setProgress] = useState(0);
   const [temperature, setTemperature] = useState(0);
@@ -20,6 +19,10 @@ function App() {
   const [costHistory, setCostHistory] = useState([]);
   const [iteration, setIteration] = useState(0);
   const [totalIter, setTotalIter] = useState(0);
+
+  // Multi-stage state
+  const [stages, setStages] = useState([]);       // array of stage objects from backend
+  const [selectedStage, setSelectedStage] = useState('all'); // 'all' | 1 | 2 | ...
 
   const pollRef = useRef(null);
 
@@ -59,12 +62,12 @@ function App() {
       setTotalIter(d.total_iterations);
 
       if (d.status === 'finished' && d.result) {
-        setRoutes(d.result.routes || {});
+        const stagesData = d.result.stages || [];
+        setStages(stagesData);
+        setSelectedStage('all');
         setMetrics(d.result);
         setCostHistory(d.result.cost_history || []);
-        // Refresh drones/orders so batteries & assignments update
         fetchAll();
-        // Stop polling
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
@@ -88,7 +91,8 @@ function App() {
         alert(e.detail || 'Failed to start simulation');
         return;
       }
-      setRoutes({});
+      setStages([]);
+      setSelectedStage('all');
       setMetrics(null);
       setCostHistory([]);
       setSimStatus('running');
@@ -103,7 +107,8 @@ function App() {
     clearInterval(pollRef.current);
     pollRef.current = null;
     await fetch(`${API}/reset`, { method: 'POST' });
-    setRoutes({});
+    setStages([]);
+    setSelectedStage('all');
     setMetrics(null);
     setCostHistory([]);
     setSimStatus('idle');
@@ -125,11 +130,6 @@ function App() {
         <div className="logo">
           <span className="logo-icon">🚁</span>
           ROUTECORE
-          <span style={{
-            fontSize: '10px', fontWeight: 500, letterSpacing: '1px',
-            color: 'var(--text-muted)', marginLeft: '4px',
-            background: 'none', WebkitTextFillColor: 'var(--text-muted)',
-          }}></span>
         </div>
 
         {/* Centre – status + progress */}
@@ -137,56 +137,116 @@ function App() {
           <span className={`status-badge ${simStatus}`}>
             <span className="status-dot" />
             {simStatus === 'idle' && 'Ready to Start'}
-            {simStatus === 'running' && `Optimizing… ${progress.toFixed(0)}%`}
-            {simStatus === 'finished' && 'Simulation Complete'}
+            {simStatus === 'running' && `Trip ${iteration} — ${progress.toFixed(0)}%`}
+            {simStatus === 'finished' && `Done · ${metrics?.total_stages ?? 0} Trips · ${metrics?.served_orders ?? 0}/${metrics?.total_orders ?? 0} Orders`}
           </span>
 
           {simStatus === 'running' && (
-            <div style={{ width: '140px' }}>
-              <div className="progress-track">
-                <div className="progress-fill" style={{ width: `${progress}%` }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div style={{ width: '140px' }}>
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${progress}%` }} />
+                </div>
+                <div className="progress-labels">
+                  <span>Trip {iteration}</span>
+                  <span>{progress.toFixed(0)}%</span>
+                </div>
               </div>
-              <div className="progress-labels">
-                <span>T={temperature.toFixed(2)}</span>
-                <span>iter {iteration.toLocaleString()}</span>
+              <div style={{ display: 'flex', gap: '8px', fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                <span>COST: {currentCost.toFixed(1)}</span>
+                <span>BEST: {bestCost.toFixed(1)}</span>
               </div>
             </div>
           )}
 
-          {/* Cost graph after/during simulation */}
-          {costHistory.length > 2 && (
-            <div style={{ width: '100px', height: '32px', display: 'flex', alignItems: 'flex-end', gap: '1px', opacity: 0.85 }}>
-              {costHistory.slice(-40).map((v, i) => (
-                <div
-                  key={i}
-                  style={{
-                    flex: 1, minWidth: '2px',
-                    height: `${Math.max(4, ((v - minCost) / costRange) * 30)}px`,
-                    background: `linear-gradient(180deg, var(--cyan), var(--purple))`,
-                    borderRadius: '1px 1px 0 0', opacity: 0.7,
-                  }}
-                />
-              ))}
-            </div>
-          )}
+
         </div>
 
-        {/* Right – metrics + buttons */}
+        {/* Right – metrics + stage filter + buttons */}
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-          {metrics && (
-            <div style={{ display: 'flex', gap: '20px' }}>
-              <div className="metric-chip">
-                <strong>{metrics.total_distance?.toFixed(1)} km</strong>
-                Total Dist
+          {/* Baseline Distance Calculation */}
+          {orders.length > 0 && !metrics && simStatus === 'idle' && (
+            <div className="metric-chip">
+              <strong>
+                {orders.reduce((sum, o) => sum + (o.distance_to_depot * 2), 0).toFixed(1)} km
+              </strong>
+              <span>Est. Unoptimized</span>
+            </div>
+          )}
+
+          {metrics && (() => {
+            const currentMetrics = selectedStage === 'all' 
+              ? metrics 
+              : stages.find(s => s.stage === selectedStage);
+            
+            if (!currentMetrics) return null;
+
+            const servedOrders = orders.filter(o => o.status === 'assigned');
+            const baseline = servedOrders.reduce((sum, o) => sum + (o.distance_to_depot * 2), 0);
+            const saved = baseline - metrics.total_distance;
+            const percentSaved = baseline > 0 ? (saved / baseline) * 100 : 0;
+
+            return (
+              <div style={{ display: 'flex', gap: '20px' }}>
+                {selectedStage === 'all' && (
+                  <div className="metric-chip" title="Total distance if drones flew to each order individually and back">
+                    <strong style={{ color: 'var(--text-muted)' }}>{baseline.toFixed(1)} km</strong>
+                    <span>Baseline Dist</span>
+                  </div>
+                )}
+                <div className="metric-chip">
+                  <strong style={{ color: selectedStage === 'all' ? 'var(--cyan)' : 'var(--text)' }}>
+                    {currentMetrics.total_distance?.toFixed(1)} km
+                  </strong>
+                  <span>{selectedStage === 'all' ? 'Optimized Dist' : 'Trip Dist'}</span>
+                </div>
+                {selectedStage === 'all' && saved > 0 && (
+                  <div className="metric-chip">
+                    <strong style={{ color: 'var(--green)' }}>{percentSaved.toFixed(1)}%</strong>
+                    <span>Efficiency</span>
+                  </div>
+                )}
+                <div className="metric-chip">
+                  <strong>{currentMetrics.total_energy?.toFixed(1)}</strong>
+                  <span>{selectedStage === 'all' ? 'Total Energy' : 'Trip Energy'}</span>
+                </div>
+                <div className="metric-chip" title="SA Cost = Distance + (Energy * 0.1) + Penalties">
+                  <strong style={{ color: 'var(--purple)' }}>
+                    {currentMetrics.total_cost?.toFixed(2)}
+                  </strong>
+                  <span>SA Cost</span>
+                </div>
+                <div className="metric-chip">
+                  <strong>
+                    {selectedStage === 'all' 
+                      ? `${metrics.served_orders}/${metrics.total_orders}` 
+                      : Object.values(currentMetrics.assignments || {}).reduce((sum, oids) => sum + oids.length, 0)
+                    }
+                  </strong>
+                  <span>{selectedStage === 'all' ? 'Total Served' : 'Orders Served'}</span>
+                </div>
               </div>
-              <div className="metric-chip">
-                <strong>{metrics.total_energy?.toFixed(1)}</strong>
-                Energy
-              </div>
-              <div className="metric-chip">
-                <strong>{metrics.total_cost?.toFixed(1)}</strong>
-                SA Cost
-              </div>
+            );
+          })()}
+
+          {/* Stage filter buttons — only visible after simulation finishes */}
+          {simStatus === 'finished' && stages.length > 0 && (
+            <div className="stage-filter">
+              <button
+                className={`stage-btn ${selectedStage === 'all' ? 'active' : ''}`}
+                onClick={() => setSelectedStage('all')}
+              >
+                All
+              </button>
+              {stages.map(s => (
+                <button
+                  key={s.stage}
+                  className={`stage-btn ${selectedStage === s.stage ? 'active' : ''}`}
+                  onClick={() => setSelectedStage(s.stage)}
+                >
+                  Trip {s.stage}
+                </button>
+              ))}
             </div>
           )}
 
@@ -210,23 +270,49 @@ function App() {
         </div>
       </header>
 
-      {/* ── 2-Panel Main Layout ────────────────────────────────────── */}
+      {/* ── 3-Panel Main Layout ────────────────────────────────────── */}
       <main className="main-layout">
         <DronePanel
-          drones={drones}
+          drones={(() => {
+            if (selectedStage === 'all') return drones;
+            const stageData = stages.find(s => s.stage === selectedStage);
+            if (!stageData) return drones;
+            
+            return drones.map(d => {
+              const stageMetrics = stageData.drone_metrics[d.id];
+              return {
+                ...d,
+                current_battery: stageMetrics ? stageMetrics.remaining_battery : 100,
+                status: stageMetrics ? 'delivering' : 'idle'
+              };
+            });
+          })()}
           onRefresh={fetchDrones}
           simStatus={simStatus}
         />
 
         <MapComponent
-          orders={orders}
+          orders={(() => {
+            if (selectedStage === 'all') return orders;
+            const stageData = stages.find(s => s.stage === selectedStage);
+            if (!stageData) return orders;
+            const stageOrderIds = Object.values(stageData.assignments).flat();
+            return orders.filter(o => stageOrderIds.includes(o.id));
+          })()}
           drones={drones}
-          routes={routes}
+          stages={stages}
+          selectedStage={selectedStage}
           simStatus={simStatus}
         />
 
         <OrderPanel
-          orders={orders}
+          orders={(() => {
+            if (selectedStage === 'all') return orders;
+            const stageData = stages.find(s => s.stage === selectedStage);
+            if (!stageData) return orders;
+            const stageOrderIds = Object.values(stageData.assignments).flat();
+            return orders.filter(o => stageOrderIds.includes(o.id));
+          })()}
           drones={drones}
           onRefresh={fetchOrders}
           simStatus={simStatus}
